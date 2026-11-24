@@ -19,7 +19,7 @@ Everything runs locally: no API keys and no paid services. On the bundled benchm
 
 ![ragdial-demo: chunking ablation, severed tables, retrieval benchmark and before/after diff](docs/demo.gif)
 
-<sub>A real run of `uvx --from ragdial-mcp ragdial-demo`, rendered by [`scripts/make_demo_gif.py`](scripts/make_demo_gif.py).</sub>
+<sub>A real run of `ragdial-demo`, captured with its colours and rendered by [`scripts/make_demo_gif.py`](scripts/make_demo_gif.py). Orange = fixed-size chunking, blue = header-aware chunking.</sub>
 
 ---
 
@@ -53,31 +53,14 @@ uv run pytest            # 32 deterministic tests, no downloads
 
 To run the latest unreleased `main` instead of the PyPI release, use `uvx --from git+https://github.com/Salman-khann/RAGDial-MCP ragdial-mcp`.
 
-The real output of `uv run ragdial-demo`, abridged:
+What the demo shows (the numbers in the GIF above):
 
-```
-[2] chunking ablation
-config           chunks  p50 tok  p95 tok  damage  tables cut
-fixed-256-o0     45      256.0    256.0    0.302   12/14
-markdown-256-o0  91      111.0    243.5    0.0371  5/14     ← cut tables keep a replicated header row
+| Chunker | Tables cut in half | Damage | Best search | Recall@5 | MRR | nDCG@5 |
+|---|---|---|---|---|---|---|
+| fixed-256 (every 256 tokens) | 12 of 14 | 0.30 | BM25 | 0.82 | 0.73 | 0.742 |
+| markdown-256 (header-aware) | 5 of 14, header row repeated | 0.04 | BM25 | 0.98 | 0.91 | **0.926** |
 
-[3] boundary splits in fixed-256-o0
-  - config_reference#storage-keys (table) cut between config_reference::0001 | config_reference::0002
-      ...'Directories that hold partition segments. Spread across disks'  <CUT>  ' for throughput. |\n| `storage.segment_bytes` | size | 512MiB |'
-
-[4] retrieval benchmark (30 queries, embedder=hash-2048, store=numpy)
-variant                      R@5    MRR    nDCG@5
-markdown-256-o0|bm25|none    0.983  0.911  0.926
-markdown-256-o0|hybrid|none  0.917  0.786  0.803
-fixed-256-o0|bm25|none       0.817  0.728  0.742
-...
-
-[5] diff fixed-256-o0|bm25|none  ->  markdown-256-o0|bm25|none
-  recall_at_k    0.8167 -> 0.9833   (+0.1667)
-  ndcg_at_k       0.742 -> 0.926    (+0.184)
-  fixed: ['q01', 'q06', 'q10', 'q12', 'q19']
-  regressed: []
-```
+Header-aware chunking answers 5 more of the 30 questions (q01, q06, q10, q12, q19) and breaks none.
 
 To use real models (`BAAI/bge-small-en-v1.5`, the `BAAI/bge-reranker-base` cross-encoder, and ChromaDB):
 
