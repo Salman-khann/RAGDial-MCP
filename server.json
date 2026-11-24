@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Salman-khann/ragdial-mcp",
+  "title": "RAGDial",
+  "description": "Run RAG chunking & retrieval ablations: boundary-damage audits, Recall@k, MRR, nDCG@k, hybrid search",
+  "version": "0.1.1",
+  "repository": {
+    "url": "https://github.com/Salman-khann/RAGDial-MCP",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Salman-khann/RAGDial-MCP",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "ragdial-mcp",
+      "version": "0.1.1",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "RAGDIAL_HOME",
+          "description": "Directory for the SQLite experiment store (default: ~/.ragdial)",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

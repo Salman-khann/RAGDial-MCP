@@ -1,5 +1,7 @@
 # RAGDial MCP
 
+<!-- mcp-name: io.github.Salman-khann/ragdial-mcp -->
+
 [![CI](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ragdial-mcp)](https://pypi.org/project/ragdial-mcp/)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
@@ -274,6 +276,7 @@ RAGDial-MCP/
 ├── pyproject.toml              # uv project, extras: ml, pdf; entry points
 ├── Dockerfile                  # Streamable HTTP server on :8000/mcp
 ├── .mcp.json                   # Claude Code project config
+├── server.json                 # MCP Registry listing (io.github.Salman-khann/ragdial-mcp)
 ├── .github/workflows/
 │   ├── ci.yml                  # tests on Linux/Windows/macOS, wheel check, Docker HTTP smoke test
 │   └── release.yml             # GitHub release -> build, verify, publish to PyPI
@@ -313,9 +316,10 @@ Runs persist in SQLite at `$RAGDIAL_HOME/ragdial.db` (default `~/.ragdial`), so 
 
 ## Releasing
 
-1. Bump `__version__` in [`src/ragdial_mcp/__init__.py`](src/ragdial_mcp/__init__.py) and push.
-2. Publish a GitHub release tagged `v<version>` (for example `v0.1.0`).
+1. Bump `__version__` in [`src/ragdial_mcp/__init__.py`](src/ragdial_mcp/__init__.py) and both `version` fields in [`server.json`](server.json), then push. A test fails if they disagree.
+2. Publish a GitHub release tagged `v<version>` (for example `v0.1.1`).
 3. [`release.yml`](.github/workflows/release.yml) checks that the tag matches the version, runs the tests, builds the sdist and wheel, runs the wheel in isolation, and uploads it to PyPI with trusted publishing (no API token stored).
+4. It then lists the new version in the [official MCP Registry](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Salman-khann/ragdial-mcp) as `io.github.Salman-khann/ragdial-mcp`, authenticating with GitHub OIDC. The registry verifies PyPI ownership through the `mcp-name` comment at the top of this README.
 
 ## License
 
