@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/ragdial-mcp)](https://pypi.org/project/ragdial-mcp/)
+[![MCP Registry](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fregistry.modelcontextprotocol.io%2Fv0.1%2Fservers%2Fio.github.Salman-khann%252Fragdial-mcp%2Fversions%2Flatest&query=%24.server.version&label=MCP%20Registry&prefix=v&color=6E56CF)](https://registry.modelcontextprotocol.io/v0.1/servers?search=io.github.Salman-khann/ragdial-mcp)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![MCP SDK](https://img.shields.io/badge/MCP%20SDK-v2-6E56CF)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
