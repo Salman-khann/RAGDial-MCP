@@ -40,9 +40,12 @@ class ChunkConfigResult(BaseModel):
     tokens_p50: float
     tokens_p95: float
     tokens_max: int
+    measured_overlap: float = Field(0.0, description="Mean tokens actually shared by consecutive chunks; "
+                                    "0 means the requested overlap had no effect")
     damage_score: float = Field(description="0 = no structure severed, 1 = every structure severed (weighted)")
     severed: dict[str, str] = Field(description="severed/total per structure kind")
-    mitigated_tables: int = Field(description="Severed tables whose header row was replicated into every piece")
+    mitigated_tables: int = Field(description="Severed tables whose own header row is in every piece")
+    lost_structures: int = Field(0, description="Structures with text in no chunk at all (a chunker bug if > 0)")
 
 
 class ChunkingAblationResult(BaseModel):
@@ -50,8 +53,9 @@ class ChunkingAblationResult(BaseModel):
     corpus_id: str
     embedder: str | None = Field(description="Embedder used by the semantic chunker, if any")
     configs: list[ChunkConfigResult] = Field(description="Sorted by damage_score ascending")
-    least_damage: str
+    least_damage: str = Field(description="Least boundary damage; not necessarily the best for retrieval")
     skipped: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
     next_step: str
 
 
@@ -61,6 +65,7 @@ class BoundarySplit(BaseModel):
     kind: str
     mitigated: bool
     oversized: bool
+    lost: bool = False
     left_chunk: str | None
     right_chunk: str | None
     before_cut: str
@@ -83,9 +88,11 @@ class VariantMetrics(BaseModel):
     retriever: str
     reranker: str
     chunks: int
-    recall_at_k: float
-    mrr: float
+    recall_at_k: float = Field(description="Share of evidence groups found in the top k (equals hit rate when "
+                               "every question has one evidence group)")
+    mrr: float = Field(description="Mean reciprocal rank of the first relevant chunk, searched at least 10 deep")
     ndcg_at_k: float
+    ndcg_ci95: tuple[float, float] = Field((0.0, 0.0), description="Bootstrap 95% CI for nDCG@k over questions")
     hit_rate: float
     p50_ms: float
     p95_ms: float
@@ -109,6 +116,9 @@ class BenchmarkResult(BaseModel):
     reranker: str
     results: list[VariantMetrics] = Field(description="Sorted by nDCG@k descending")
     best_variant: str
+    tied_with_best: list[str] = Field(default_factory=list, description=(
+        "Variants whose nDCG@k is not distinguishable from the best (paired bootstrap 95% CI includes 0). "
+        "Pick among these by latency or cost, not by the small nDCG difference."))
     worst_queries: list[QueryFailure] = Field(description="Bottom-3 queries for the best variant")
     warnings: list[str] = Field(default_factory=list)
     next_step: str
@@ -133,6 +143,9 @@ class RunDiff(BaseModel):
     variant_b: str
     top_k: int
     metrics: dict[str, MetricDelta]
+    ndcg_delta_ci95: tuple[float, float] = Field(description="Paired bootstrap 95% CI for nDCG@k (B - A)")
+    sign_test_p: float = Field(description="Two-sided sign test on fixed vs regressed questions")
+    significant: bool = Field(description="True when the nDCG@k CI excludes 0")
     fixed: list[QueryFlip] = Field(description="Queries that went from miss to hit within top_k")
     regressed: list[QueryFlip] = Field(description="Queries that went from hit to miss within top_k")
     rank_improved: int

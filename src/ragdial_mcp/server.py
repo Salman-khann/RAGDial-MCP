@@ -54,24 +54,28 @@ def build_server(lab: Lab | None = None) -> MCPServer:
         return state["lab"]
 
     def tool_call(method: str, *args):
-        """Run a Lab method; anticipated failures reach the model as readable tool errors."""
+        """Run a Lab method; failures reach the model as readable tool errors, never a bare crash."""
         try:
             return getattr(get_lab(), method)(*args)
         except LabError as exc:
             raise ToolError(str(exc)) from exc
+        except (ValueError, TypeError, KeyError, OSError, ArithmeticError) as exc:
+            raise ToolError(f"{type(exc).__name__}: {exc}") from exc
 
     def resource_call(method: str, *args) -> str:
         try:
-            return json.dumps(getattr(get_lab(), method)(*args), indent=1)
+            # compact JSON: resources exist to save context, so don't spend it on indentation
+            return json.dumps(getattr(get_lab(), method)(*args), separators=(",", ":"))
         except LabError as exc:
             raise ResourceNotFoundError(str(exc)) from exc
 
     mcp = MCPServer(name="ragdial", title="RAGDial MCP", version=__version__, instructions=INSTRUCTIONS)
     readonly = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
     writes = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
+    replaces = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
 
     # ------------------------------------------------------------------ tools
-    @mcp.tool(annotations=writes)
+    @mcp.tool(annotations=replaces)
     def ingest_corpus(
         folder_path: Annotated[str, Field(description="Folder of .md/.txt/.pdf files (searched recursively), or '@sample' for the bundled 13-doc benchmark pack")],
         corpus_id: Annotated[str | None, Field(description="ID to store the corpus under; defaults to the folder name. Re-ingesting an ID replaces it and its runs.")] = None,
@@ -176,13 +180,19 @@ budget of {latency_budget_ms} ms.
    `ragdial://experiments`. Use benchmark runs for this corpus. If none exist, run
    `run_chunking_ablation` (fixed, recursive, markdown, semantic at 256/512 tokens) and
    `benchmark_retrieval` with bm25, dense and hybrid first.
-2. Drop every variant whose p95_ms exceeds {latency_budget_ms}. Among the rest, choose by nDCG@k, then
-   Recall@k, then lower damage_score, then lower latency. Mention the runner-up and the margin.
-3. If a reranker run exists, state whether its quality gain justifies its latency cost within budget.
-4. Output a spec as a YAML block with: chunking (strategy, size, overlap), retriever (type, fusion,
+2. Drop every variant whose p95_ms exceeds {latency_budget_ms}. Among the rest, start from the best by
+   nDCG@k, but treat every variant in that run's `tied_with_best` (and any whose ndcg_ci95 overlaps the
+   best's) as equally good: choose among the tied ones by lower latency, then simpler setup (BM25 before
+   hybrid, no reranker before reranker). State the confidence intervals; never call a winner on a
+   difference inside them.
+3. If any run used the 'hash' embedder (see its warnings), do NOT recommend dense or hybrid retrieval
+   from it; recommend rerunning with embedder='bge-small' first.
+4. If a reranker run exists, state whether its quality gain (with CI) justifies its latency cost.
+5. Output a spec as a YAML block with: chunking (strategy, size, overlap), retriever (type, fusion,
    top_k, candidate depth), embedder, reranker, vector store, and expected metrics (Recall@k, MRR,
-   nDCG@k, p95 ms) with the run_id that supports each number.
-5. List the known failure modes still open (query IDs) and one experiment to run next."""
+   nDCG@k with 95% CI, p95 ms) with the run_id that supports each number.
+6. Note that the numbers only hold for questions like the golden set's, list the open failure modes
+   (query IDs), and give one experiment to run next."""
 
     return mcp
 

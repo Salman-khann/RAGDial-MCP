@@ -40,8 +40,11 @@ class TiktokenTokenizer(Tokenizer):
         decoded, offsets = self._enc.decode_with_offsets(ids)
         if decoded != text:  # pragma: no cover - only on lossy decode
             return super().spans(text)
+        # A token that starts mid-character (CJK, emoji) shares its offset with the previous
+        # token. Keep it as a zero-width span: dropping it undercounts tokens and lets chunks
+        # silently exceed their size cap.
         ends = offsets[1:] + [len(text)]
-        return [(s, e) for s, e in zip(offsets, ends) if e > s]
+        return list(zip(offsets, ends))
 
 
 @lru_cache(maxsize=1)

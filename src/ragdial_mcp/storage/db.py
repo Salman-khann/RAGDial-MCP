@@ -109,6 +109,29 @@ class ExperimentDB:
                 (run_id, kind, corpus_id, parent_run_id, utcnow(), json.dumps(config), json.dumps(summary)),
             )
 
+    def _insert_run(self, run_id: str, kind: str, corpus_id: str, parent_run_id: str | None,
+                    config: dict[str, Any], summary: dict[str, Any]) -> None:
+        self._conn.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run_id, kind, corpus_id, parent_run_id, utcnow(), json.dumps(config), json.dumps(summary)),
+        )
+
+    def save_chunking_run(self, run_id: str, corpus_id: str, config: dict[str, Any], summary: dict[str, Any],
+                          chunk_sets: list[tuple[str, list[dict[str, Any]], dict[str, Any]]]) -> None:
+        """Store a chunking run and all its chunk sets atomically: all or nothing."""
+        with self._lock, self._conn:
+            self._insert_run(run_id, "chunking", corpus_id, None, config, summary)
+            self._conn.executemany("INSERT INTO chunk_sets VALUES (?, ?, ?, ?)",
+                                   [(run_id, cid, json.dumps(ch), json.dumps(au)) for cid, ch, au in chunk_sets])
+
+    def save_benchmark_run(self, run_id: str, corpus_id: str, parent_run_id: str, config: dict[str, Any],
+                           summary: dict[str, Any], rows: list[tuple]) -> None:
+        """Store a benchmark run and its per-query rows atomically: all or nothing."""
+        with self._lock, self._conn:
+            self._insert_run(run_id, "benchmark", corpus_id, parent_run_id, config, summary)
+            self._conn.executemany("INSERT INTO query_results VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   [(run_id, *r[:7], json.dumps(r[7])) for r in rows])
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         row = self._conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return self._run_dict(row) if row else None

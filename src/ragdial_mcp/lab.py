@@ -9,6 +9,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import sqlite3
 import uuid
 from collections import Counter
 from pathlib import Path
@@ -16,8 +17,8 @@ from typing import Any
 
 import numpy as np
 
-from .chunking.boundary_audit import AuditResult, audit_boundaries, excerpt
-from .chunking.strategies import Chunk, ChunkConfig, chunk_corpus, normalize_strategy
+from .chunking.boundary_audit import KINDS, AuditResult, audit_boundaries, excerpt, trim_span
+from .chunking.strategies import Chunk, ChunkConfig, chunk_corpus, measured_overlap, normalize_strategy
 from .ingestion.parser import Document, load_folder, slugify
 from .models import (
     BenchmarkResult,
@@ -37,6 +38,7 @@ from .retrieval.embedders import get_embedder
 from .retrieval.hybrid import RETRIEVERS, ChunkSearcher, get_reranker
 from .samples import SAMPLE_TOKEN, sample_corpus, sample_golden
 from .retrieval.metrics import groups_covered, normalize, percentile, score_ranking
+from .retrieval.stats import mean_ci, paired_diff_ci, sign_test_p
 from .storage.db import ExperimentDB
 from .tokens import TokenIndex, get_tokenizer
 
@@ -63,17 +65,26 @@ def _pct(values: list[int] | list[float], p: float) -> float:
 class GoldenQuery:
     __slots__ = ("query_id", "question", "groups", "tags")
 
-    def __init__(self, raw: dict[str, Any], line: int) -> None:
+    def __init__(self, raw: Any, line: int) -> None:
+        if not isinstance(raw, dict):
+            raise LabError(f"golden line {line}: expected a JSON object, got {type(raw).__name__}")
         self.query_id = str(raw.get("id") or raw.get("query_id") or f"q{line:03d}")
+        where = f"golden line {line} ({self.query_id})"
         self.question = raw.get("question") or raw.get("query")
-        if not self.question:
-            raise LabError(f"golden line {line}: missing 'question'")
+        if not isinstance(self.question, str) or not self.question.strip():
+            raise LabError(f"{where}: missing 'question'")
         groups = raw.get("evidence_groups")
         if groups is None:
             ev = raw.get("evidence")
             if ev is None:
-                raise LabError(f"golden line {line} ({self.query_id}): needs 'evidence' or 'evidence_groups'")
-            groups = [[ev]] if isinstance(ev, str) else [list(ev)]
+                raise LabError(f"{where}: needs 'evidence' or 'evidence_groups'")
+            groups = [[ev]] if isinstance(ev, str) else [ev]
+        # strict shape: a list of groups, each a non-empty list of non-empty strings. A list of
+        # bare strings would otherwise be iterated character by character and match anything.
+        if not isinstance(groups, list) or not groups or not all(
+                isinstance(g, list) and g and all(isinstance(s, str) and s.strip() for s in g) for g in groups):
+            raise LabError(f"{where}: 'evidence' must be a string or list of strings, and 'evidence_groups' "
+                           "a list of lists of strings, e.g. [[\"header row\", \"data row\"], [\"other fact\"]]")
         self.groups = [[normalize(s) for s in g] for g in groups]
         self.tags = raw.get("tags", [])
 
@@ -166,47 +177,53 @@ class Lab:
         if len(configs) > MAX_CONFIGS:
             raise LabError(f"{len(configs)} configurations requested; the limit is {MAX_CONFIGS}. Narrow the grid.")
 
-        emb = get_embedder(embedder) if "semantic" in strategies else None
+        try:
+            emb = get_embedder(embedder) if "semantic" in strategies else None
+        except ValueError as exc:
+            raise LabError(str(exc)) from exc
         tis = self._tis(corpus_id)
         block_tokens: dict[tuple[str, int, int], int] = {}
         for d in docs:
             ti = tis.get(d.doc_id) or tis.setdefault(d.doc_id, TokenIndex(d.text))
             for b in d.structures:
-                block_tokens[(d.doc_id, b.start, b.end)] = ti.count(b.start, b.end)
+                s, e = trim_span(d.text, b.start, b.end)
+                block_tokens[(d.doc_id, s, e)] = ti.count(s, e)
 
         run_id = _new_id("chk")
         results: list[ChunkConfigResult] = []
-        self.db.save_run(run_id, "chunking", corpus_id, None,
-                         {"strategies": strategies, "chunk_sizes": sorted(set(chunk_sizes)),
-                          "overlaps": sorted(set(overlaps)), "embedder": emb.name if emb else None,
-                          "tokenizer": get_tokenizer().name}, {})
-        for cfg in configs:
+        chunk_sets: list[tuple[str, list[dict[str, Any]], dict[str, Any]]] = []
+        for cfg in configs:  # compute everything first; nothing is stored unless the whole run succeeds
             chunks = chunk_corpus(docs, cfg, emb, tis)
             audit = audit_boundaries(docs, chunks, cfg.size, block_tokens)
             toks = [c.tokens for c in chunks]
-            res = ChunkConfigResult(
+            results.append(ChunkConfigResult(
                 config_id=cfg.config_id, strategy=cfg.strategy, size=cfg.size, overlap=cfg.overlap,
                 chunks=len(chunks), tokens_p50=_pct(toks, 50), tokens_p95=_pct(toks, 95),
-                tokens_max=max(toks) if toks else 0, damage_score=audit.damage_score,
+                tokens_max=max(toks) if toks else 0, measured_overlap=measured_overlap(chunks, tis),
+                damage_score=audit.damage_score,
                 severed={k: f"{v.severed}/{v.total}" for k, v in audit.by_kind.items()},
-                mitigated_tables=audit.mitigated,
-            )
-            results.append(res)
-            self.db.save_chunk_set(run_id, cfg.config_id, [c.model_dump() for c in chunks], audit.model_dump())
+                mitigated_tables=audit.mitigated, lost_structures=audit.lost,
+            ))
+            chunk_sets.append((cfg.config_id, [c.model_dump() for c in chunks], audit.model_dump()))
         results.sort(key=lambda r: (r.damage_score, r.config_id))
+        no_effect = sorted({r.config_id for r in results if r.overlap > 0 and r.measured_overlap == 0})
+        notes = ([f"Overlap had no effect for {', '.join(no_effect)}: these chunkers only carry whole "
+                  "sentences/blocks within a section, and none fit."] if no_effect else [])
         summary = {"configs": [r.model_dump() for r in results], "least_damage": results[0].config_id,
-                   "skipped": skipped}
-        self._update_summary(run_id, summary)
+                   "skipped": skipped, "notes": notes}
+        config = {"strategies": strategies, "chunk_sizes": sorted(set(chunk_sizes)),
+                  "overlaps": sorted(set(overlaps)), "embedder": emb.name if emb else None,
+                  "tokenizer": get_tokenizer().name}
+        try:
+            self.db.save_chunking_run(run_id, corpus_id, config, summary, chunk_sets)
+        except sqlite3.IntegrityError as exc:
+            raise LabError(f"Corpus '{corpus_id}' changed while chunking (re-ingested?). Run it again.") from exc
         return ChunkingAblationResult(
             run_id=run_id, corpus_id=corpus_id, embedder=emb.name if emb else None, configs=results,
-            least_damage=results[0].config_id, skipped=skipped,
+            least_damage=results[0].config_id, skipped=skipped, notes=notes,
             next_step=(f"inspect_boundary_splits(run_id='{run_id}') to see what got cut, or "
                        f"benchmark_retrieval(run_id='{run_id}', dataset_path=...) to measure retrieval."),
         )
-
-    def _update_summary(self, run_id: str, summary: dict[str, Any]) -> None:
-        with self.db._lock, self.db._conn:
-            self.db._conn.execute("UPDATE runs SET summary_json = ? WHERE run_id = ?", (json.dumps(summary), run_id))
 
     def inspect_boundary_splits(self, run_id: str, limit: int = 5, config_id: str | None = None,
                                 kinds: list[str] | None = None) -> BoundaryInspection:
@@ -230,9 +247,12 @@ class Lab:
         docs, _ = self._corpus(chunk_run["corpus_id"])
         by_id = {d.doc_id: d for d in docs}
         limit = max(1, min(limit, 25))
+        bad_kinds = [k for k in kinds or [] if k not in KINDS]
+        if bad_kinds:
+            raise LabError(f"Unknown kind(s) {bad_kinds}. Choose from {list(KINDS)}")
         items = [s for s in audit.severed_items if not kinds or s.kind in kinds]
-        # prefer unmitigated damage, one example per document first, for variety
-        items.sort(key=lambda s: (s.mitigated, {"table": 0, "code": 1, "list": 2}.get(s.kind, 3)))
+        # lost content first, then unmitigated damage, one example per document first, for variety
+        items.sort(key=lambda s: (not s.lost, s.mitigated, {"table": 0, "code": 1, "list": 2}.get(s.kind, 3)))
         picked, seen_docs = [], set()
         for s in items:
             if s.doc_id not in seen_docs:
@@ -249,12 +269,21 @@ class Lab:
         for s in picked:
             before, after = excerpt(by_id[s.doc_id], s)
             splits.append(BoundarySplit(doc_id=s.doc_id, section_id=s.section_id, kind=s.kind,
-                                        mitigated=s.mitigated, oversized=s.oversized, left_chunk=s.left_chunk,
+                                        mitigated=s.mitigated, oversized=s.oversized, lost=s.lost,
+                                        left_chunk=s.left_chunk,
                                         right_chunk=s.right_chunk, before_cut=before, after_cut=after))
         by_kind = Counter(s.kind for s in audit.severed_items)
-        hint = ("No structures were severed." if not audit.severed_items else
-                "Tables/code cut mid-structure lose their header or context. Try strategy='markdown' "
-                "(keeps blocks atomic, replicates table headers) or a larger chunk size.")
+        if not audit.severed_items:
+            hint = "No structures were severed."
+        else:
+            ranked = sorted(configs, key=lambda c: (c["damage_score"], c["config_id"]))
+            others = [c["config_id"] for c in ranked if c["config_id"] != config_id][:2]
+            hint = (("Some content is in no chunk at all (lost=true): that is a chunker bug, please report it. "
+                     if audit.lost else "")
+                    + "Severed tables/code lose their header or context. Lower damage does not guarantee "
+                    "better retrieval: confirm with benchmark_retrieval"
+                    + (f", e.g. against the least-damaged configs in this run: {', '.join(others)}." if others
+                       else "."))
         return BoundaryInspection(run_id=chunk_run_id, config_id=config_id, damage_score=audit.damage_score,
                                   severed_total=len(audit.severed_items), severed_by_kind=dict(by_kind),
                                   splits=splits, hint=hint)
@@ -264,22 +293,28 @@ class Lab:
         if dataset_path.strip() == SAMPLE_TOKEN:
             return sample_golden()
         p = Path(dataset_path).expanduser()
+        # exact path only: never substitute a different file that merely shares the name
         candidates = [p] if p.is_absolute() else [Path.cwd() / p, *(
             base / p for base in [Path(corpus_folder), *Path(corpus_folder).parents][:3])]
-        candidates += [base / p.name for base in [Path(corpus_folder), *Path(corpus_folder).parents][:2]]
         for c in candidates:
             if c.is_file():
                 return c.resolve()
         raise LabError(f"Dataset not found: {dataset_path} (looked in cwd and next to the corpus folder)")
 
     def _load_golden(self, path: Path) -> list[GoldenQuery]:
-        queries = []
-        for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        queries: list[GoldenQuery] = []
+        seen: dict[str, int] = {}
+        for i, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
             if line.strip() and not line.lstrip().startswith("//"):
                 try:
-                    queries.append(GoldenQuery(json.loads(line), i))
+                    q = GoldenQuery(json.loads(line), i)
                 except json.JSONDecodeError as exc:
                     raise LabError(f"{path.name} line {i}: invalid JSON ({exc.msg})") from exc
+                if q.query_id in seen:
+                    raise LabError(f"{path.name} line {i}: duplicate query id '{q.query_id}' "
+                                   f"(first used on line {seen[q.query_id]})")
+                seen[q.query_id] = i
+                queries.append(q)
         if not queries:
             raise LabError(f"{path} has no queries")
         return queries
@@ -297,15 +332,15 @@ class Lab:
         if not 1 <= top_k <= 100:
             raise LabError("top_k must be between 1 and 100")
         all_cfgs = [c["config_id"] for c in chunk_run["summary"]["configs"]]
-        cfg_ids = configs or all_cfgs
+        cfg_ids = list(dict.fromkeys(configs)) if configs else all_cfgs
         missing = [c for c in cfg_ids if c not in all_cfgs]
         if missing:
             raise LabError(f"Config(s) {missing} not in run {run_id}. Available: {all_cfgs}")
         try:
             rr = get_reranker(reranker)
             emb = get_embedder(embedder) if any(r != "bm25" for r in retrievers) else None
-        except ValueError as exc:
-            raise LabError(str(exc)) from exc
+        except (ValueError, OSError) as exc:
+            raise LabError(f"Could not load model: {exc}") from exc
         reranker_name = rr.name if rr else "none"
         dataset = self._resolve_dataset(dataset_path, corpus["folder"])
         queries = self._load_golden(dataset)
@@ -316,23 +351,36 @@ class Lab:
         if orphan:
             warnings.append(f"{len(orphan)} queries have evidence not found verbatim in the corpus "
                             f"(always a miss): {orphan[:10]}")
+        if emb is not None and emb.name.startswith("hash"):
+            warnings.append("Dense/hybrid used the 'hash' embedder, a lexical stand-in for a real model. Do not "
+                            "choose dense or hybrid retrieval from these numbers; rerun with embedder='bge-small' "
+                            "(needs the ml extra).")
 
         bench_id = _new_id("bench")
         rows: list[tuple] = []
         variants: list[VariantMetrics] = []
+        per_variant_ndcg: dict[str, list[float]] = {}
         store_used = "n/a"
         for cfg_id in cfg_ids:
-            raw_chunks, _ = self.db.get_chunk_set(run_id, cfg_id)  # type: ignore[misc]
-            chunks = [Chunk.model_validate(c) for c in raw_chunks]
+            stored = self.db.get_chunk_set(run_id, cfg_id)
+            if stored is None:
+                raise LabError(f"Chunk set {cfg_id} of run {run_id} no longer exists (corpus re-ingested?). "
+                               "Run the chunking ablation again.")
+            chunks = [Chunk.model_validate(c) for c in stored[0]]
+            if not chunks:
+                raise LabError(f"Config {cfg_id} produced no chunks; nothing to search.")
             texts = [c.text for c in chunks]
             norm = [normalize(t) for t in texts]
             searcher = ChunkSearcher(texts, emb or get_embedder("hash"), vector_store)
             try:
-                searcher.warm(retrievers)
+                try:
+                    searcher.warm(retrievers)
+                except ValueError as exc:
+                    raise LabError(str(exc)) from exc
                 if emb is not None:
                     store_used = searcher.vector_store
                 for retriever in retrievers:
-                    variant = f"{cfg_id}|{retriever}|{'none' if rr is None else reranker}"
+                    variant = f"{cfg_id}|{retriever}|{reranker_name}"
                     searcher.search(queries[0].question, retriever, top_k, rr, rerank_depth)  # warm-up
                     lat, rec, mrr, ndcg = [], [], [], []
                     for q in queries:
@@ -345,19 +393,23 @@ class Lab:
                         ndcg.append(m["ndcg"])
                         rows.append((variant, q.query_id, m["recall"], m["rr"], m["ndcg"], m["first_rank"],
                                      round(ms, 3), [chunks[i].chunk_id for i in ranked[:top_k]]))
+                    per_variant_ndcg[variant] = ndcg
+                    lo, hi = mean_ci(ndcg)
                     variants.append(VariantMetrics(
                         variant_id=variant, chunk_config=cfg_id, retriever=retriever, reranker=reranker_name,
                         chunks=len(chunks), recall_at_k=round(float(np.mean(rec)), 4),
                         mrr=round(float(np.mean(mrr)), 4), ndcg_at_k=round(float(np.mean(ndcg)), 4),
+                        ndcg_ci95=(round(lo, 3), round(hi, 3)),
                         hit_rate=round(float(np.mean([r > 0 for r in rec])), 4),
-                        p50_ms=_pct(lat, 50) if max(lat) >= 1 else round(percentile(lat, 50), 3),
-                        p95_ms=_pct(lat, 95) if max(lat) >= 1 else round(percentile(lat, 95), 3),
+                        p50_ms=round(percentile(lat, 50), 2), p95_ms=round(percentile(lat, 95), 2),
                     ))
             finally:
                 searcher.close()
 
         variants.sort(key=lambda v: (-v.ndcg_at_k, -v.recall_at_k, v.p95_ms, v.variant_id))
         best = variants[0]
+        tied = [v.variant_id for v in variants[1:]
+                if paired_diff_ci(per_variant_ndcg[v.variant_id], per_variant_ndcg[best.variant_id])[0] <= 0]
         qtext = {q.query_id: q.question for q in queries}
         best_rows = sorted((r for r in rows if r[0] == best.variant_id), key=lambda r: (r[4], r[2], r[1]))
         worst = [QueryFailure(query_id=r[1], question=qtext[r[1]][:100], first_rank=r[5], recall_at_k=r[2])
@@ -366,13 +418,17 @@ class Lab:
                   "configs": cfg_ids, "embedder": emb.name if emb else None, "vector_store": store_used,
                   "rerank_depth": rerank_depth, "queries": len(queries)}
         summary = {"variants": [v.model_dump() for v in variants], "best_variant": best.variant_id,
-                   "questions": qtext, "warnings": warnings}
-        self.db.save_run(bench_id, "benchmark", chunk_run["corpus_id"], run_id, config, summary)
-        self.db.save_query_results(bench_id, rows)
+                   "tied_with_best": tied, "questions": qtext, "warnings": warnings}
+        try:
+            self.db.save_benchmark_run(bench_id, chunk_run["corpus_id"], run_id, config, summary, rows)
+        except sqlite3.IntegrityError as exc:
+            raise LabError(f"Chunking run {run_id} was deleted while benchmarking (corpus re-ingested?). "
+                           "Run it again.") from exc
         return BenchmarkResult(
             run_id=bench_id, chunking_run_id=run_id, dataset=dataset.name, queries=len(queries), top_k=top_k,
             embedder=emb.name if emb else "n/a (bm25 only)", vector_store=store_used, reranker=reranker_name,
-            results=variants, best_variant=best.variant_id, worst_queries=worst, warnings=warnings,
+            results=variants, best_variant=best.variant_id, tied_with_best=tied, worst_queries=worst,
+            warnings=warnings,
             next_step=(f"diff_experiment_runs(run_a='{bench_id}', run_b=...) after a change, or read "
                        f"ragdial://experiments/{bench_id}/report for the per-query table."),
         )
@@ -398,7 +454,10 @@ class Lab:
         if not shared:
             raise LabError("The two runs share no query IDs (different datasets?).")
         k_a, k_b = ra["config"]["top_k"], rb["config"]["top_k"]
-        k = min(k_a, k_b)
+        if k_a != k_b:
+            raise LabError(f"Runs use different top_k ({k_a} vs {k_b}); their Recall@k and nDCG@k are not "
+                           "comparable. Rerun one of them with the same top_k.")
+        k = k_a
 
         def hit(r: dict[str, Any]) -> bool:
             return r["first_rank"] is not None and r["first_rank"] <= k
@@ -431,11 +490,18 @@ class Lab:
             else:
                 unchanged += 1
         d = metrics["ndcg_at_k"].delta
+        lo, hi = paired_diff_ci([rows_a[q]["ndcg"] for q in shared], [rows_b[q]["ndcg"] for q in shared])
+        p_sign = sign_test_p(len(fixed), len(regressed))
+        significant = lo > 0 or hi < 0
         verdict = (f"B {'improves' if d > 0 else 'regresses' if d < 0 else 'matches'} nDCG@{k} by {d:+.3f} "
-                   f"({len(fixed)} fixed, {len(regressed)} regressed), p95 latency {metrics['p95_ms'].delta:+.2f} ms.")
+                   f"(95% CI {lo:+.3f} to {hi:+.3f}; "
+                   f"{'a real difference' if significant else 'not distinguishable from noise'} on "
+                   f"{len(shared)} questions). {len(fixed)} fixed, {len(regressed)} regressed "
+                   f"(sign test p={p_sign:.3f}); p95 latency {metrics['p95_ms'].delta:+.2f} ms.")
         return RunDiff(run_a=run_a, variant_a=va, run_b=run_b, variant_b=vb, top_k=k, metrics=metrics,
-                       fixed=fixed, regressed=regressed, rank_improved=improved, rank_worsened=worsened,
-                       unchanged=unchanged, verdict=verdict)
+                       ndcg_delta_ci95=(round(lo, 4), round(hi, 4)), sign_test_p=round(p_sign, 4),
+                       significant=significant, fixed=fixed, regressed=regressed, rank_improved=improved,
+                       rank_worsened=worsened, unchanged=unchanged, verdict=verdict)
 
     # ================================================================ resources
     def experiments_index(self) -> dict[str, Any]:

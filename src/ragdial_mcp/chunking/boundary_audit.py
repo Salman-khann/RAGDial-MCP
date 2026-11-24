@@ -5,9 +5,14 @@ chunk's source span contains it whole. Overlap can rescue a structure: if a
 cut lands inside a table but another chunk still holds the full table, it is
 intact somewhere and not counted.
 
-A severed table is **mitigated** when every chunk touching its rows also
-carries the table's header row in its text (the ``markdown`` chunker
-replicates headers), so each piece is still self-describing.
+A structure is **lost** when some of its text is in no chunk at all. Lost
+structures always count as severed at full weight, so a chunker can never
+score well by dropping content.
+
+A severed table is **mitigated** when every chunk touching it carries *that
+table's own* header row: either the header lies inside the chunk's source
+span, or the chunker prepended it (the ``markdown`` chunker replicates
+headers). A matching header that belongs to a different table does not count.
 
 ``damage_score`` is the weighted share of severed structures, 0.0 (perfect)
 to 1.0 (everything cut). Tables and code are weighted higher than prose
@@ -27,6 +32,7 @@ from .strategies import Chunk
 
 WEIGHTS = {"table": 3.0, "code": 3.0, "list": 1.5, "paragraph": 1.0}
 KIND_PRIORITY = {"table": 0, "code": 1, "list": 2, "paragraph": 3}
+KINDS = tuple(WEIGHTS)
 
 
 class SeveredStructure(BaseModel):
@@ -40,6 +46,7 @@ class SeveredStructure(BaseModel):
     right_chunk: str | None
     mitigated: bool
     oversized: bool  # larger than the chunk size, so it could never fit in one chunk
+    lost: bool = False  # some of its text is in no chunk at all
 
 
 class KindDamage(BaseModel):
@@ -52,42 +59,74 @@ class AuditResult(BaseModel):
     structures: int
     severed: int
     mitigated: int
+    lost: int = 0
     by_kind: dict[str, KindDamage]
     severed_items: list[SeveredStructure]
 
 
-def _severed(doc: Document, block: Block, chunks: list[Chunk], starts: list[int],
+def trim_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """Strip surrounding whitespace from a span; the audit and its token counts both use this."""
+    while start < end and text[start].isspace():
+        start += 1
+    while end > start and text[end - 1].isspace():
+        end -= 1
+    return start, end
+
+
+def _uncovered(text: str, start: int, end: int, chunks: list[Chunk]) -> bool:
+    """True if any non-whitespace character in [start, end) lies in no chunk."""
+    pos = start
+    for c in sorted(chunks, key=lambda c: c.start):
+        if c.start > pos and text[pos:min(c.start, end)].strip():
+            return True
+        pos = max(pos, c.end)
+        if pos >= end:
+            return False
+    return bool(text[pos:end].strip())
+
+
+def _carries_own_header(doc: Document, block: Block, c: Chunk) -> bool:
+    header = block.header_line or ""
+    if not header:
+        return False
+    header_end = block.start + len(header)
+    if c.start <= block.start and c.end >= header_end:
+        return True  # the real header row is inside this chunk's source span
+    body = doc.text[c.start:c.end]
+    prefix = c.text[:-len(body)] if body and c.text.endswith(body) else ""
+    return header in prefix  # header the chunker prepended for this piece
+
+
+def _severed(doc: Document, block: Block, chunks: list[Chunk], starts: list[int], max_len: int,
              size: int, token_count: int) -> SeveredStructure | None:
-    # candidate chunks are those starting at or before the structure start
-    hi = bisect.bisect_right(starts, block.start)
-    for c in chunks[:hi]:
-        if c.start <= block.start and c.end >= block.end:
-            return None
-    touching = [c for c in chunks if c.start < block.end and c.end > block.start]
-    if not touching:  # structure fell entirely outside chunks (e.g. whitespace-only)
+    lo = bisect.bisect_left(starts, block.start - max_len)
+    hi = bisect.bisect_left(starts, block.end)
+    near = chunks[lo:hi]
+    if any(c.start <= block.start and c.end >= block.end for c in near):
         return None
-    # first boundary strictly inside the structure
+    touching = [c for c in near if c.start < block.end and c.end > block.start]
+    lost = _uncovered(doc.text, block.start, block.end, touching)
     cut, left, right = block.start, None, None
-    candidates: list[tuple[int, str | None, str | None]] = []
+    candidates: list[int] = []
     for c in touching:
         if block.start < c.end < block.end:
-            candidates.append((c.end, c.chunk_id, None))
+            candidates.append(c.end)
         if block.start < c.start < block.end:
-            candidates.append((c.start, None, c.chunk_id))
+            candidates.append(c.start)
     if candidates:
-        cut = min(x[0] for x in candidates)
+        cut = min(candidates)
         left = next((c.chunk_id for c in touching if c.start < cut <= c.end), None)
         right = next((c.chunk_id for c in touching if c.start <= cut < c.end and c.chunk_id != left), None)
-    mitigated = False
-    if block.kind == "table" and block.header_line:
-        mitigated = all(block.header_line in c.text for c in touching)
+    mitigated = (not lost and block.kind == "table" and bool(touching)
+                 and all(_carries_own_header(doc, block, c) for c in touching))
     return SeveredStructure(doc_id=doc.doc_id, section_id=block.section_id, kind=block.kind,
                             start=block.start, end=block.end, cut_at=cut, left_chunk=left,
-                            right_chunk=right, mitigated=mitigated, oversized=token_count > size)
+                            right_chunk=right, mitigated=mitigated, oversized=token_count > size, lost=lost)
 
 
 def audit_boundaries(docs: list[Document], chunks: list[Chunk], size: int,
                      token_counts: dict[tuple[str, int, int], int] | None = None) -> AuditResult:
+    """``token_counts`` is keyed by ``(doc_id, *trim_span(...))`` and feeds the ``oversized`` flag."""
     by_doc: dict[str, list[Chunk]] = defaultdict(list)
     for c in chunks:
         by_doc[c.doc_id].append(c)
@@ -98,30 +137,28 @@ def audit_boundaries(docs: list[Document], chunks: list[Chunk], size: int,
     for doc in docs:
         doc_chunks = sorted(by_doc.get(doc.doc_id, []), key=lambda c: c.start)
         starts = [c.start for c in doc_chunks]
+        max_len = max((c.end - c.start for c in doc_chunks), default=0)
         for block in doc.structures:
-            s, e = block.start, block.end
-            while s < e and doc.text[s].isspace():
-                s += 1
-            while e > s and doc.text[e - 1].isspace():
-                e -= 1
+            s, e = trim_span(doc.text, block.start, block.end)
             if e <= s:
                 continue
             block = block.model_copy(update={"start": s, "end": e})
             w = WEIGHTS.get(block.kind, 1.0)
             totals[block.kind] += 1
             weight_total += w
-            n = (token_counts or {}).get((doc.doc_id, block.start, block.end), 0)
-            hit = _severed(doc, block, doc_chunks, starts, size, n)
+            n = (token_counts or {}).get((doc.doc_id, s, e), 0)
+            hit = _severed(doc, block, doc_chunks, starts, max_len, size, n)
             if hit:
                 severed_counts[block.kind] += 1
                 weight_damage += w * (0.5 if hit.mitigated else 1.0)
                 items.append(hit)
-    items.sort(key=lambda s: (KIND_PRIORITY.get(s.kind, 9), s.mitigated, s.doc_id, s.start))
+    items.sort(key=lambda s: (not s.lost, KIND_PRIORITY.get(s.kind, 9), s.mitigated, s.doc_id, s.start))
     return AuditResult(
         damage_score=round(weight_damage / weight_total, 4) if weight_total else 0.0,
         structures=sum(totals.values()),
         severed=len(items),
         mitigated=sum(1 for s in items if s.mitigated),
+        lost=sum(1 for s in items if s.lost),
         by_kind={k: KindDamage(total=totals[k], severed=severed_counts[k]) for k in sorted(totals)},
         severed_items=items,
     )

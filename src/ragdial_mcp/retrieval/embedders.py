@@ -124,8 +124,10 @@ def get_embedder(name: str = "auto") -> Embedder:
         key = "bge-small" if sentence_transformers_available() else "hash"
     if key not in _EMBEDDERS:
         if key == "hash" or key.startswith("hash-"):
-            dim = int(key.split("-", 1)[1]) if "-" in key else 2048
-            _EMBEDDERS[key] = HashEmbedder(dim)
+            suffix = key.split("-", 1)[1] if "-" in key else "2048"
+            if not suffix.isdigit() or not 16 <= int(suffix) <= 65536:
+                raise ValueError(f"Embedder '{name}': use 'hash' or 'hash-<dim>' with dim between 16 and 65536.")
+            _EMBEDDERS[key] = HashEmbedder(int(suffix))
         else:
             if not sentence_transformers_available():
                 raise ValueError(

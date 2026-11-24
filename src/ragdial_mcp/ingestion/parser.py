@@ -25,8 +25,11 @@ BlockKind = Literal["header", "paragraph", "table", "code", "list"]
 
 SUPPORTED_SUFFIXES = {".md", ".markdown", ".txt", ".pdf"}
 
-_HEADER = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
-_FENCE = re.compile(r"^\s*(```|~~~)")
+# a closing "#" sequence needs whitespace before it, so "# Intro to C#" keeps its "#"
+_HEADER = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$")
+_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+_TABLE_SEP = re.compile(r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?$")
+_THEMATIC_BREAK = re.compile(r"^\s{0,3}([-*_])(\s*\1){2,}\s*$")
 _TABLE = re.compile(r"^\s*\|.*\|\s*$")
 _LIST = re.compile(r"^(\s*)([-*+]|\d+[.)])\s+")
 
@@ -95,9 +98,34 @@ def _is_table(line: str) -> bool:
     return bool(_TABLE.match(line))
 
 
+def is_table_separator(line: str) -> bool:
+    """GFM delimiter row such as ``|---|:--:|``."""
+    return "-" in line and bool(_TABLE_SEP.match(line.strip()))
+
+
+def _fence_open(line: str) -> str | None:
+    """The fence string if ``line`` opens a code fence.
+
+    CommonMark: a backtick fence's info string may not contain backticks, so a line
+    like ```` ```x``` is inline ```` is inline code, not a fence that swallows the document.
+    """
+    m = _FENCE.match(line.rstrip("\n"))
+    if not m or (m.group(1)[0] == "`" and "`" in m.group(2)):
+        return None
+    return m.group(1)
+
+
+def _fence_closes(line: str, fence: str) -> bool:
+    """A closing fence uses the same character, at least as many times, and nothing else."""
+    s = line.strip()
+    return len(s) >= len(fence) and set(s) == {fence[0]}
+
+
 def parse_markdown(text: str, doc_id: str, path: str = "", source_format: str = "md") -> Document:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = text.splitlines(keepends=True)
+    # split on "\n" only: splitlines() also breaks on form feeds and U+2028, common in PDF text
+    parts = text.split("\n")
+    lines = [ln + "\n" for ln in parts[:-1]] + ([parts[-1]] if parts[-1] else [])
     offsets: list[int] = []
     pos = 0
     for line in lines:
@@ -134,10 +162,19 @@ def parse_markdown(text: str, doc_id: str, path: str = "", source_format: str = 
     nested: list[Block] = []
     i, n_lines = 0, len(lines)
 
+    def table_starts(idx: int) -> bool:
+        """A GFM table: a pipe row immediately followed by a delimiter row."""
+        return (idx + 1 < n_lines and _is_table(lines[idx]) and _is_table(lines[idx + 1])
+                and is_table_separator(lines[idx + 1]))
+
     while i < n_lines:
         line = lines[i]
         stripped = line.strip()
         if not stripped:
+            i += 1
+            continue
+
+        if _THEMATIC_BREAK.match(line.rstrip("\n")):  # "---" / "* * *" rules are not list items
             i += 1
             continue
 
@@ -153,18 +190,17 @@ def parse_markdown(text: str, doc_id: str, path: str = "", source_format: str = 
             i += 1
             continue
 
-        fm = _FENCE.match(line)
-        if fm:
-            fence = fm.group(1)
+        fence = _fence_open(line)
+        if fence:
             j = i + 1
-            while j < n_lines and not lines[j].strip().startswith(fence):
+            while j < n_lines and not _fence_closes(lines[j], fence):
                 j += 1
             j = min(j, n_lines - 1)
             blocks.append(Block(kind="code", start=offsets[i], end=end_of(j), section_id=current.section_id))
             i = j + 1
             continue
 
-        if _is_table(line):
+        if table_starts(i):
             j = i
             while j + 1 < n_lines and _is_table(lines[j + 1]):
                 j += 1
@@ -190,7 +226,7 @@ def parse_markdown(text: str, doc_id: str, path: str = "", source_format: str = 
             blocks.append(Block(kind="list", start=offsets[i], end=end_of(j), section_id=current.section_id))
             k = i
             while k <= j:  # tables nested inside list items
-                if _is_table(lines[k]):
+                if k + 1 <= j and table_starts(k):
                     t = k
                     while t + 1 <= j and _is_table(lines[t + 1]):
                         t += 1
@@ -206,8 +242,8 @@ def parse_markdown(text: str, doc_id: str, path: str = "", source_format: str = 
         j = i  # paragraph: runs until a blank line or another block starts
         while j + 1 < n_lines:
             nxt = lines[j + 1]
-            if (not nxt.strip() or _HEADER.match(nxt.rstrip("\n")) or _FENCE.match(nxt)
-                    or _is_table(nxt) or _LIST.match(nxt)):
+            if (not nxt.strip() or _HEADER.match(nxt.rstrip("\n")) or _fence_open(nxt)
+                    or table_starts(j + 1) or _LIST.match(nxt)):
                 break
             j += 1
         blocks.append(Block(kind="paragraph", start=offsets[i], end=end_of(j), section_id=current.section_id))

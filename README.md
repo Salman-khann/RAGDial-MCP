@@ -9,17 +9,17 @@
 ![MCP SDK](https://img.shields.io/badge/MCP%20SDK-v2-6E56CF)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**RAGDial MCP is a RAG retrieval ablation & chunking lab, packaged as an MCP server.** It turns an AI coding assistant (Claude Code, Cursor, Claude Desktop) into a systematic retrieval tuner. Instead of guessing chunk sizes and overlaps, the agent runs controlled experiments, looks at exactly which tables and code blocks got cut in half, and picks a pipeline using Recall@k, MRR, nDCG@k and p95 latency.
+**RAGDial MCP is a RAG retrieval ablation & chunking lab, packaged as an MCP server.** It turns an AI coding assistant (Claude Code, Cursor, Claude Desktop) into a systematic retrieval tuner. Instead of guessing chunk sizes and overlaps, the agent runs controlled experiments, looks at exactly which tables and code blocks got cut in half, and compares pipelines on Recall@k, MRR, nDCG@k and p95 latency, with confidence intervals so small differences aren't mistaken for wins.
 
 ```
 ingest_corpus → run_chunking_ablation → inspect_boundary_splits → benchmark_retrieval → diff_experiment_runs
 ```
 
-Everything runs locally: no API keys and no paid services. On the bundled benchmark pack, the full loop takes about 4 seconds on a laptop.
+Everything runs locally: no API keys and no paid services. The first run downloads tiktoken's tokenizer file (about 1.7 MB); offline, a regex tokenizer takes over and every result says which one was used. On the bundled benchmark pack, the full loop takes a few seconds on a laptop.
 
 ![ragdial-demo: chunking ablation, severed tables, retrieval benchmark and before/after diff](docs/demo.gif)
 
-<sub>A real run of `ragdial-demo`, captured with its colours and rendered by [`scripts/make_demo_gif.py`](scripts/make_demo_gif.py). Orange = fixed-size chunking, blue = header-aware chunking.</sub>
+<sub>A real run of `ragdial-demo`, captured with its colours and rendered by [`scripts/make_demo_gif.py`](scripts/make_demo_gif.py). Orange = naive fixed-size chunking, green = tuned fixed-size chunking, blue = header-aware chunking.</sub>
 
 ---
 
@@ -53,14 +53,22 @@ uv run pytest            # 32 deterministic tests, no downloads
 
 To run the latest unreleased `main` instead of the PyPI release, use `uvx --from git+https://github.com/Salman-khann/RAGDial-MCP ragdial-mcp`.
 
-What the demo shows (the numbers in the GIF above):
+### What the demo shows, and what it doesn't
 
-| Chunker | Tables cut in half | Damage | Best search | Recall@5 | MRR | nDCG@5 |
-|---|---|---|---|---|---|---|
-| fixed-256 (every 256 tokens) | 12 of 14 | 0.30 | BM25 | 0.82 | 0.73 | 0.742 |
-| markdown-256 (header-aware) | 5 of 14, header row repeated | 0.04 | BM25 | 0.98 | 0.91 | **0.926** |
+The demo compares three chunkers on the bundled pack (30 questions, BM25, top-5):
 
-Header-aware chunking answers 5 more of the 30 questions (q01, q06, q10, q12, q19) and breaks none.
+| Chunker | Median chunk | Tables cut | nDCG@5 | 95% CI |
+|---|---|---|---|---|
+| fixed-256, no overlap (naive baseline) | 256 tok | 12 of 14 | 0.763 | 0.63 to 0.88 |
+| fixed-512, 64-token overlap (tuned baseline) | 512 tok | 3 of 14 | 0.865 | 0.79 to 0.94 |
+| markdown-256 (header-aware) | 110 tok | 5 of 14, header repeated | **0.926** | 0.86 to 0.98 |
+
+Read it this way:
+
+- **Against naive fixed-size chunking, header-aware chunking clearly wins:** +0.163 nDCG@5 (95% CI +0.06 to +0.28). 4 questions go from miss to hit and none go the other way, though 4-0 alone is not significant (sign test p = 0.125).
+- **Against a tuned baseline, the difference is within noise:** +0.061 against fixed-512 with overlap (95% CI −0.01 to +0.14). On this pack the tool reports six variants as statistically tied with the best.
+- **Where markdown's gain comes from:** its chunks are smaller (median 110 vs 256 tokens) and start with a `Doc > Section` breadcrumb. Without the breadcrumb, markdown-256 scores 0.897, so about 0.03 of the 0.163 comes from that prefix, not from where the text is split.
+- **This is a demo, not evidence.** The corpus and questions are synthetic, table-heavy, and written by the same author as the chunkers. Run RAGDial on your own documents and questions before deciding anything.
 
 To use real models (`BAAI/bge-small-en-v1.5`, the `BAAI/bge-reranker-base` cross-encoder, and ChromaDB):
 
@@ -68,14 +76,7 @@ To use real models (`BAAI/bge-small-en-v1.5`, the `BAAI/bge-reranker-base` cross
 uvx --from "ragdial-mcp[ml]" ragdial-demo --embedder bge-small --reranker bge-reranker-base
 ```
 
-The same before/after comparison with real models (measured on a laptop CPU, no GPU):
-
-| Variant | Recall@5 | MRR | nDCG@5 | p95 per query |
-|---|---|---|---|---|
-| markdown-256, dense + bge reranker | 0.983 | 0.950 | **0.950** | 13.2 s |
-| fixed-256, dense + bge reranker | 0.833 | 0.767 | 0.779 | 16.8 s |
-
-Five queries flip from miss to hit and none regress. Note the latency: the cross-encoder reranker is very slow on CPU. That's exactly the trade-off `generate_rag_spec` weighs against a latency budget.
+An earlier run with real models (v0.1.2, before the 0.2 metric fixes, laptop CPU, no GPU) showed the same direction: nDCG@5 0.779 for fixed-256 vs 0.950 for markdown-256 with dense retrieval and the bge reranker. The cross-encoder took 13 to 17 seconds per question on CPU, and that time grows with chunk length. That's the trade-off `generate_rag_spec` weighs against a latency budget.
 
 ## Connect it to an agent
 
@@ -184,7 +185,7 @@ Keep in mind when hosting:
 | Prompt | What it makes the agent do |
 |---|---|
 | `diagnose_retrieval_failures(run_id)` | Pull the worst queries from the report, run `inspect_boundary_splits`, classify each miss (boundary damage / ranking / vocabulary / dilution), test **one** targeted fix and confirm it with `diff_experiment_runs` |
-| `generate_rag_spec(corpus_id, latency_budget_ms)` | Drop variants over the p95 budget, rank the rest by nDCG → recall → damage → latency, and emit a YAML production spec that cites the supporting run IDs |
+| `generate_rag_spec(corpus_id, latency_budget_ms)` | Drop variants over the p95 budget, treat variants statistically tied on nDCG as equal and choose among them by latency and simplicity, never recommend dense/hybrid from `hash`-embedder runs, and emit a YAML production spec that cites the supporting run IDs and confidence intervals |
 
 ### Context-window discipline, by design
 
@@ -202,12 +203,18 @@ Each chunker records the exact source span (`start`/`end` character offsets) of 
 |---|---|
 | `fixed` | Sliding windows of exactly `size` tiktoken tokens, `overlap` tokens shared |
 | `recursive` | Recursive splitting on paragraph → line → sentence → clause → word, greedily merged up to `size` |
-| `markdown` | Header-aware: never crosses a section, keeps tables/code/lists atomic when they fit, splits oversized tables by rows **with the header row replicated**, prefixes every chunk with its breadcrumb (`Doc > Section > Subsection`) |
+| `markdown` | Header-aware: never crosses a section, keeps tables/code/lists atomic when they fit, splits oversized tables (including tables nested in lists) by rows **with the header row replicated**, prefixes every chunk with its breadcrumb (`Doc > Section > Subsection`). `size` includes the breadcrumb. Sections are often smaller than `size`, so markdown chunks are usually much smaller than the cap |
 | `semantic` | Embeds sentences/blocks and breaks where adjacent similarity falls in the bottom quartile, capped at `size` |
+
+`size` is a cap. Chunk text re-tokenized on its own can land a token or two above it, because the boundaries of a token window rarely align exactly with how the substring tokenizes.
+
+**Overlap:** `fixed` shares exactly `overlap` tokens. The other strategies carry whole trailing sentences or blocks, and `markdown` never carries across a section boundary, so a requested overlap can have little or no effect. Every config reports `measured_overlap` (tokens actually shared by neighbouring chunks), and the ablation adds a note when overlap did nothing.
 
 ### Boundary damage ([`chunking/boundary_audit.py`](src/ragdial_mcp/chunking/boundary_audit.py))
 
-A structure is **severed** when no single chunk contains it whole, so overlap that keeps a full copy somewhere rescues it. The damage score is the weighted share of severed structures (tables and code ×3, lists ×1.5, paragraphs ×1). A severed table whose pieces all carry the header row counts as **mitigated** at half weight. Every severed item also records whether it was *oversized*, meaning bigger than the chunk size and so impossible to keep intact.
+A structure is **severed** when no single chunk contains it whole, so overlap that keeps a full copy somewhere rescues it. A structure with text in no chunk at all is **lost**; that always counts as full damage, so a chunker can't score well by dropping content. The damage score is the weighted share of severed structures (tables and code ×3, lists ×1.5, paragraphs ×1). A severed table counts as **mitigated** (half weight) only when every piece carries *that table's own* header row; a matching header from a different table doesn't count. Every severed item also records whether it was *oversized*, meaning bigger than the chunk size and so impossible to keep intact.
+
+Damage measures exactly what header-aware chunking is designed to avoid, so the lowest-damage config is usually a `markdown` one. Low damage doesn't guarantee better retrieval; confirm with `benchmark_retrieval`.
 
 ### Retrieval ([`retrieval/hybrid.py`](src/ragdial_mcp/retrieval/hybrid.py))
 
@@ -216,7 +223,7 @@ A structure is **severed** when no single chunk contains it whole, so overlap th
 * `hybrid`: **Reciprocal Rank Fusion** (k = 60) of the top 50 from BM25 and the top 50 from dense
 * optional cross-encoder reranking (`bge-reranker-base`) of the top 20 fused candidates
 
-Latency is measured per query (query embedding + search + rerank) after a warm-up query, and reported as p50/p95.
+Latency is measured per query (query embedding + search + rerank) after a warm-up query, and reported as p50/p95. Each question is timed once, so with 30 questions p95 is roughly the second-slowest query. Latency also scales with chunk count (BM25 scores every chunk) and chunk length (the reranker reads whole chunks), so it reflects chunking as much as the retriever.
 
 ### Ground truth that can't be fooled by chunking ([`retrieval/metrics.py`](src/ragdial_mcp/retrieval/metrics.py))
 
@@ -228,11 +235,22 @@ Golden queries reference **evidence snippets quoted verbatim from the corpus**, 
               "| Storage overage per GB-month | n/a | $0.10 | $0.08 | $0.05 | custom |"]}
 ```
 
-A chunk holding the price row without the column header can't say which plan `$0.05` belongs to, and the metric scores it as a miss. Splitting a table therefore shows up as a measurable retrieval failure. Queries can also carry several `evidence_groups`, for answers that span documents. Recall@k is then the share of groups covered.
+A chunk holding the price row without the column header can't say which plan `$0.05` belongs to, and the metric scores it as a miss. Splitting a table therefore shows up as a measurable retrieval failure. Two caveats:
 
-* **Recall@k**: share of evidence groups found in the top k ("found somewhere")
-* **MRR**: 1 / rank of the first relevant chunk, ranked at least 10 deep
-* **nDCG@k**: binary gain where each evidence group counts once, so a duplicate overlapping chunk can't inflate it and "ranked #1" beats "ranked #5"
+* **The header must be unique.** If several tables share the same header row, requiring it proves nothing, because any of those tables' headers would match. The bundled set only requires headers that appear once in the corpus, and a test enforces that.
+* **The requirement favours header replication.** Only a chunker that repeats headers (or keeps whole tables) can meet it, so use it where the header carries meaning (wide pricing or plan tables), not for self-describing key/value rows.
+
+Queries can also carry several `evidence_groups` for answers that span documents.
+
+* **Recall@k**: share of evidence groups found in the top k. With one group per question (28 of the 30 bundled ones), this is the hit rate.
+* **MRR**: 1 / rank of the first relevant chunk, searched at least 10 deep (MRR@10)
+* **nDCG@k**: gain counts each evidence group once, at the rank where it's first covered. "Ranked #1" beats "ranked #5", and one chunk that answers everything scores 1.0.
+
+### Statistics
+
+Golden sets are small, so every benchmark reports a bootstrap 95% confidence interval on nDCG@k per variant, plus `tied_with_best`: the variants not distinguishable from the top one. `diff_experiment_runs` adds a paired CI on the nDCG@k change, a sign test on fixed vs regressed questions, and a `significant` flag. It refuses to compare runs with different `top_k`.
+
+Results computed with the `hash` embedder carry a warning not to choose dense or hybrid retrieval from them.
 
 ---
 
@@ -240,7 +258,14 @@ A chunk holding the price row without the column header can't say which plan `$0
 
 [`sample_data/corpus/`](sample_data/corpus) holds 13 documents for a fictional event-streaming platform: about 10k tokens, 14 tables (two nested inside numbered list items), 16 code fences in Python/Bash/TOML/JSON/diff, and Markdown plus plain text. They include a config reference with 4 wide tables, a rate-limit and quota guide, an error catalogue, an SDK guide, a Kubernetes runbook, pricing, security, a migration guide, a changelog, a postmortem and a plain-text FAQ.
 
-[`sample_data/golden_qa.jsonl`](sample_data/golden_qa.jsonl) holds 30 questions: 14 about tables (header + row must co-occur), 5 about code (two lines of the same block), 9 about prose or lists, and 2 cross-document questions. A test checks that every evidence snippet exists verbatim in the corpus.
+[`sample_data/golden_qa.jsonl`](sample_data/golden_qa.jsonl) holds 30 questions:
+
+- **14 about tables:** 7 require a unique header row and the data row in the same chunk (tagged `needs-header`), and 7 need only the row.
+- **5 about code:** 4 need two lines of the same block, 1 needs a single line.
+- **9 about prose or lists.**
+- **2 cross-document questions.**
+
+Tests check that every evidence snippet exists verbatim in the corpus, and that every required header row is unique.
 
 To use your own data, point `ingest_corpus` at any folder of `.md` / `.txt` / `.pdf` files (PDFs need `uv sync --extra pdf`, which converts them with `pymupdf4llm` and keeps tables) and write a JSONL file in the same format.
 
@@ -248,7 +273,7 @@ To use your own data, point `ingest_corpus` at any folder of `.md` / `.txt` / `.
 
 | `embedder=` | What it is | When |
 |---|---|---|
-| `hash` | Deterministic feature hashing of unigrams + bigrams (2048-d, sublinear TF) | Tests, CI, offline demo: identical numbers on every machine |
+| `hash` | Deterministic feature hashing of unigrams + bigrams (2048-d, sublinear TF) | Tests, CI, offline demo: identical numbers on every machine with the same tokenizer backend |
 | `bge-small` | `BAAI/bge-small-en-v1.5` via sentence-transformers, with the BGE query instruction | Real dense retrieval (`ml` extra) |
 | any HF id | Any sentence-transformers model | Your own comparisons |
 | `auto` (default) | `bge-small` if the `ml` extra is installed, otherwise `hash` | |

@@ -46,14 +46,16 @@ def score_ranking(ranked: Sequence[set[int]], n_groups: int, k: int) -> dict[str
         if i < k:
             new = groups - seen
             if new:
-                dcg += 1.0 / math.log2(i + 2)
+                # gain = number of groups this chunk newly covers, so one chunk that answers
+                # everything at rank 1 scores as well as one group per rank (it used to score 0.61)
+                dcg += len(new) / math.log2(i + 2)
                 seen |= new
     ideal_hits = min(k, n_groups)
     idcg = sum(1.0 / math.log2(i + 2) for i in range(ideal_hits))
     return {
         "recall": len(seen) / n_groups if n_groups else 0.0,
         "rr": 1.0 / first_rank if first_rank else 0.0,
-        "ndcg": dcg / idcg if idcg else 0.0,
+        "ndcg": min(1.0, dcg / idcg) if idcg else 0.0,
         "first_rank": first_rank,
     }
 
