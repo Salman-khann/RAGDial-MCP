@@ -17,6 +17,10 @@ ingest_corpus → run_chunking_ablation → inspect_boundary_splits → benchmar
 
 Everything runs locally: no API keys and no paid services. On the bundled benchmark pack, the full loop takes about 4 seconds on a laptop.
 
+![ragdial-demo: chunking ablation, severed tables, retrieval benchmark and before/after diff](docs/demo.gif)
+
+<sub>A real run of `uvx --from ragdial-mcp ragdial-demo`, rendered by [`scripts/make_demo_gif.py`](scripts/make_demo_gif.py).</sub>
+
 ---
 
 ## Quick start (under 2 minutes)
@@ -278,6 +282,8 @@ RAGDial-MCP/
 ├── Dockerfile                  # Streamable HTTP server on :8000/mcp
 ├── .mcp.json                   # Claude Code project config
 ├── server.json                 # MCP Registry listing (io.github.Salman-khann/ragdial-mcp)
+├── docs/demo.gif               # README demo, rendered from a real run
+├── scripts/make_demo_gif.py    # re-records the demo GIF (uv run --with pillow ...)
 ├── .github/workflows/
 │   ├── ci.yml                  # tests on Linux/Windows/macOS, wheel check, Docker HTTP smoke test
 │   └── release.yml             # GitHub release -> build, verify, publish to PyPI
