@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ragdial": {
+      "command": "uv",
+      "args": ["run", "ragdial-mcp"]
+    }
+  }
+}

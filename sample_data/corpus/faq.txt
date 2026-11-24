@@ -1,0 +1,28 @@
+Frequently Asked Questions
+
+How many partitions should a stream have?
+Start with the peak number of consumers you expect in one group, then add headroom for growth. A partition can be read by only one member of a group at a time, so the partition count is the upper bound on consumer parallelism. As a rule of thumb, plan for about 10 MB/s of ingress per partition. Remember that partitions can be added later but never removed.
+
+Can I change the key of a message after it was published?
+No. Records are immutable once written. To correct data, publish a new record with the same key; on a compacted stream the newer record replaces the old one during compaction.
+
+Why do my consumers see duplicate messages?
+Halyard delivers at least once by default. Duplicates appear when a consumer processes messages but crashes before committing offsets, or when a producer retries a request that actually succeeded. Use idempotent producers and make consumer processing idempotent, or use transactions with read_committed isolation for exactly-once processing.
+
+Is ordering guaranteed?
+Ordering is guaranteed per partition. All messages with the same key go to the same partition, so they are delivered in the order they were written. There is no global ordering across partitions.
+
+How long does it take for a new API key to work?
+New keys are active within 5 seconds of creation in every region of the project.
+
+Does Halyard support message priorities?
+No. Use separate streams for different priorities and allocate more consumers to the high-priority stream.
+
+What happens when a stream reaches its retention limit?
+Whole segments older than the retention time, or beyond the retention size, are deleted. Deletion happens per segment, so a partition may temporarily hold slightly more data than the limit until the active segment rolls.
+
+Can I read data from a deleted stream?
+No. Deleting a stream removes its data immediately from local disks and schedules deletion of tiered-storage objects within 24 hours. The operation cannot be undone.
+
+Where can I see consumer lag?
+Use the GET /groups/{group}/lag endpoint, the console's consumer group page, or the halyard_consumer_group_lag metric exported to Prometheus.
