@@ -9,12 +9,9 @@ from __future__ import annotations
 import argparse
 import tempfile
 import time
-from pathlib import Path
 
 from .lab import Lab
-
-ROOT = Path(__file__).resolve().parents[2]
-
+from .samples import sample_corpus, sample_golden
 
 def _table(rows: list[list[str]], header: list[str]) -> str:
     widths = [max(len(str(x)) for x in col) for col in zip(header, *rows)]
@@ -24,13 +21,15 @@ def _table(rows: list[list[str]], header: list[str]) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="ragdial-demo")
-    p.add_argument("--corpus", default=str(ROOT / "sample_data" / "corpus"))
-    p.add_argument("--dataset", default=str(ROOT / "sample_data" / "golden_qa.jsonl"))
+    p.add_argument("--corpus", default=None, help="Corpus folder (default: bundled sample pack)")
+    p.add_argument("--dataset", default=None, help="Golden JSONL (default: bundled sample pack)")
     p.add_argument("--embedder", default="hash")
     p.add_argument("--reranker", default="none")
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--home", default=None, help="Persist runs here (default: a temp dir)")
     args = p.parse_args(argv)
+    args.corpus = args.corpus or str(sample_corpus())
+    args.dataset = args.dataset or str(sample_golden())
 
     t0 = time.perf_counter()
     lab = Lab(args.home or tempfile.mkdtemp(prefix="ragdial-demo-"))

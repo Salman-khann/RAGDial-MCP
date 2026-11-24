@@ -3168,7 +3168,6 @@ wheels = [
 
 [[package]]
 name = "ragdial-mcp"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -3201,17 +3200,19 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "chromadb", marker = "extra == 'all'", specifier = ">=0.5" },
     { name = "chromadb", marker = "extra == 'ml'", specifier = ">=0.5" },
-    { name = "mcp", specifier = ">=1.13" },
+    { name = "mcp", specifier = ">=2.3,<3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "pymupdf4llm", marker = "extra == 'all'", specifier = ">=0.0.17" },
     { name = "pymupdf4llm", marker = "extra == 'pdf'", specifier = ">=0.0.17" },
-    { name = "ragdial-mcp", extras = ["ml", "pdf"], marker = "extra == 'all'" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
+    { name = "sentence-transformers", marker = "extra == 'all'", specifier = ">=3.0" },
     { name = "sentence-transformers", marker = "extra == 'ml'", specifier = ">=3.0" },
     { name = "tiktoken", specifier = ">=0.7" },
 ]
-provides-extras = ["ml", "pdf", "all"]
+provides-extras = ["all", "ml", "pdf"]
 
 [package.metadata.requires-dev]
 dev = [

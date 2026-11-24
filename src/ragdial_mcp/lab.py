@@ -35,6 +35,7 @@ from .models import (
 )
 from .retrieval.embedders import get_embedder
 from .retrieval.hybrid import RETRIEVERS, ChunkSearcher, get_reranker
+from .samples import SAMPLE_TOKEN, sample_corpus, sample_golden
 from .retrieval.metrics import groups_covered, normalize, percentile, score_ranking
 from .storage.db import ExperimentDB
 from .tokens import TokenIndex, get_tokenizer
@@ -86,7 +87,11 @@ class Lab:
 
     # ================================================================ ingestion
     def ingest_corpus(self, folder_path: str, corpus_id: str | None = None) -> IngestResult:
-        folder = Path(folder_path).expanduser().resolve()
+        if folder_path.strip() == SAMPLE_TOKEN:
+            folder = sample_corpus()
+            corpus_id = corpus_id or "sample"
+        else:
+            folder = Path(folder_path).expanduser().resolve()
         try:
             docs, warnings = load_folder(folder)
         except (FileNotFoundError, ValueError) as exc:
@@ -256,6 +261,8 @@ class Lab:
 
     # ================================================================ retrieval
     def _resolve_dataset(self, dataset_path: str, corpus_folder: str) -> Path:
+        if dataset_path.strip() == SAMPLE_TOKEN:
+            return sample_golden()
         p = Path(dataset_path).expanduser()
         candidates = [p] if p.is_absolute() else [Path.cwd() / p, *(
             base / p for base in [Path(corpus_folder), *Path(corpus_folder).parents][:3])]

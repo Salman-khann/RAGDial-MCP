@@ -99,3 +99,14 @@ async def test_errors_are_actionable(lab):
 
         with pytest.raises(Exception, match="Unknown run_id"):
             await client.read_resource("ragdial://experiments/bench-missing/report")
+
+
+async def test_sample_shortcut(lab):
+    async with Client(build_server(lab)) as client:
+        ing = await _call(client, "ingest_corpus", {"folder_path": "@sample"})
+        assert ing["corpus_id"] == "sample" and ing["file_count"] == 13
+        abl = await _call(client, "run_chunking_ablation", {
+            "corpus_id": "sample", "strategies": ["markdown"], "chunk_sizes": [256], "embedder": "hash"})
+        bench = await _call(client, "benchmark_retrieval", {
+            "run_id": abl["run_id"], "dataset_path": "@sample", "retrievers": ["bm25"]})
+        assert bench["queries"] == 30

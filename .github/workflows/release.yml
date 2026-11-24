@@ -1,0 +1,71 @@
+name: Release
+
+# Publishing a GitHub release (tag "vX.Y.Z") builds the package, tests the built
+# wheel, and uploads it to PyPI with trusted publishing (no API token stored).
+#
+# One-time setup on pypi.org: Publishing -> Add a new pending publisher
+#   PyPI project name: ragdial-mcp
+#   Owner: Salman-khann   Repository: RAGDial-MCP
+#   Workflow: release.yml  Environment: pypi
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build + verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Check tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          version=$(grep -Po '__version__ = "\K[^"]+' src/ragdial_mcp/__init__.py)
+          tag="${GITHUB_REF_NAME#v}"
+          echo "package=$version tag=$tag"
+          test "$version" = "$tag"
+
+      - name: Tests
+        run: |
+          uv sync --locked
+          uv run pytest
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Smoke-test the built wheel in isolation
+        run: |
+          wheel=$(ls dist/*.whl)
+          cd "$RUNNER_TEMP"
+          uvx --from "$GITHUB_WORKSPACE/$wheel" ragdial-demo
+          uvx --from "$GITHUB_WORKSPACE/$wheel" ragdial-mcp --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: publish to PyPI
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/ragdial-mcp/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

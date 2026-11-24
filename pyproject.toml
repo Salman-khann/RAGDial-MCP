@@ -1,12 +1,33 @@
 [project]
 name = "ragdial-mcp"
-version = "0.1.0"
-description = "RAGDial MCP: a RAG retrieval ablation & chunking lab. An MCP server that lets coding agents run controlled chunking/retrieval experiments and pick pipelines by hard metrics."
+dynamic = ["version"]
+description = "RAGDial MCP: an MCP server for RAG chunking & retrieval ablations. Boundary-damage audits, Recall@k / MRR / nDCG@k, hybrid BM25 + dense (RRF), reranking. Local-first."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Salman Khan" }]
+keywords = [
+    "mcp", "model-context-protocol", "rag", "retrieval", "chunking", "evaluation",
+    "bm25", "hybrid-search", "reranking", "llm", "embeddings", "benchmark",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
 dependencies = [
-    "mcp>=1.13",
+    "mcp>=2.3,<3",
     "pydantic>=2.7",
     "numpy>=1.26",
     "rank-bm25>=0.2.2",
@@ -23,6 +44,12 @@ ml = [
 pdf = ["pymupdf4llm>=0.0.17"]
 all = ["ragdial-mcp[ml,pdf]"]
 
+[project.urls]
+Homepage = "https://github.com/Salman-khann/RAGDial-MCP"
+Repository = "https://github.com/Salman-khann/RAGDial-MCP"
+Issues = "https://github.com/Salman-khann/RAGDial-MCP/issues"
+Changelog = "https://github.com/Salman-khann/RAGDial-MCP/releases"
+
 [project.scripts]
 ragdial-mcp = "ragdial_mcp.server:main"
 ragdial-demo = "ragdial_mcp.demo:main"
@@ -31,11 +58,22 @@ ragdial-demo = "ragdial_mcp.demo:main"
 dev = ["pytest>=8", "anyio>=4"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/ragdial_mcp/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ragdial_mcp"]
+
+# Ship the benchmark pack inside the wheel so `uvx --from ragdial-mcp ragdial-demo`
+# and the "@sample" shortcut work without cloning the repo.
+[tool.hatch.build.targets.wheel.force-include]
+"sample_data" = "ragdial_mcp/sample_data"
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "sample_data", "tests", "README.md", "LICENSE", "Dockerfile"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

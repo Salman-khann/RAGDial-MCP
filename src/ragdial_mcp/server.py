@@ -34,7 +34,7 @@ INSTRUCTIONS = """\
 RAGDial MCP, a RAG retrieval ablation & chunking lab. Tune retrieval with controlled experiments, not guesses.
 
 Typical loop:
-1. ingest_corpus(folder_path) to parse docs and count tables, code fences and headers
+1. ingest_corpus(folder_path) to parse docs and count tables, code fences and headers ("@sample" = bundled benchmark pack)
 2. run_chunking_ablation(corpus_id, strategies, chunk_sizes, overlaps) for chunk stats and boundary-damage scores
 3. inspect_boundary_splits(run_id) to see exactly which tables/code/lists were severed
 4. benchmark_retrieval(run_id, dataset_path, retrievers, reranker, top_k) for Recall@k, MRR, nDCG@k, p95 latency
@@ -73,7 +73,7 @@ def build_server(lab: Lab | None = None) -> MCPServer:
     # ------------------------------------------------------------------ tools
     @mcp.tool(annotations=writes)
     def ingest_corpus(
-        folder_path: Annotated[str, Field(description="Folder of .md/.txt/.pdf files (searched recursively)")],
+        folder_path: Annotated[str, Field(description="Folder of .md/.txt/.pdf files (searched recursively), or '@sample' for the bundled 13-doc benchmark pack")],
         corpus_id: Annotated[str | None, Field(description="ID to store the corpus under; defaults to the folder name. Re-ingesting an ID replaces it and its runs.")] = None,
     ) -> IngestResult:
         """Parse a document folder: file count, total tokens, detected tables/headers/code, document IDs."""
@@ -105,7 +105,7 @@ def build_server(lab: Lab | None = None) -> MCPServer:
     @mcp.tool(annotations=writes)
     def benchmark_retrieval(
         run_id: Annotated[str, Field(description="Chunking run to evaluate")],
-        dataset_path: Annotated[str, Field(description="Golden Q&A JSONL (absolute, relative to cwd, or next to the corpus)")],
+        dataset_path: Annotated[str, Field(description="Golden Q&A JSONL (absolute, relative to cwd, or next to the corpus), or '@sample' for the bundled 30 questions")],
         retrievers: Annotated[list[str], Field(description="Any of: bm25, dense, hybrid (BM25 + dense fused with RRF)")] = ["bm25", "dense", "hybrid"],  # noqa: B006
         reranker: Annotated[str, Field(description="'none' or a cross-encoder such as 'bge-reranker-base'")] = "none",
         top_k: Annotated[int, Field(ge=1, le=100)] = 5,

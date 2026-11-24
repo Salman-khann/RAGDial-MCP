@@ -1,6 +1,7 @@
 # RAGDial MCP
 
 [![CI](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ragdial-mcp)](https://pypi.org/project/ragdial-mcp/)
 ![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
 ![MCP SDK](https://img.shields.io/badge/MCP%20SDK-v2-6E56CF)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -19,21 +20,31 @@ Everything runs locally: no API keys and no paid services. On the bundled benchm
 
 You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and nothing else; uv fetches Python 3.11+ if it's missing.
 
+**Add it to Claude Code:**
+
+```bash
+claude mcp add ragdial -- uvx ragdial-mcp
+```
+
+Then ask: *"Ingest @sample, ablate fixed vs markdown chunking at 256/512 tokens, show me which tables got split, and benchmark against @sample."* The `@sample` shortcut points the tools at the bundled 13-document benchmark pack and its 30 golden questions. Point `ingest_corpus` at your own docs folder when you're ready.
+
+**See the whole loop in your terminal, no agent needed:**
+
+```bash
+uvx --from ragdial-mcp ragdial-demo
+```
+
+**Work on the code:**
+
 ```bash
 git clone https://github.com/Salman-khann/RAGDial-MCP.git
 cd RAGDial-MCP
 uv sync                  # core deps: MCP SDK, tiktoken, rank-bm25, numpy
 uv run ragdial-demo      # full before/after loop on sample_data/ (about 4 s)
-uv run pytest            # 31 deterministic tests, no downloads
+uv run pytest            # 32 deterministic tests, no downloads
 ```
 
-To plug it straight into Claude Code without cloning:
-
-```bash
-claude mcp add ragdial -- uvx --from git+https://github.com/Salman-khann/RAGDial-MCP ragdial-mcp
-```
-
-Then ask: *"Ingest my docs folder, ablate fixed vs markdown chunking at 256/512 tokens, and show me which tables got split."*
+To run the latest unreleased `main` instead of the PyPI release, use `uvx --from git+https://github.com/Salman-khann/RAGDial-MCP ragdial-mcp`.
 
 The real output of `uv run ragdial-demo`, abridged:
 
@@ -64,22 +75,34 @@ fixed-256-o0|bm25|none       0.817  0.728  0.742
 To use real models (`BAAI/bge-small-en-v1.5`, the `BAAI/bge-reranker-base` cross-encoder, and ChromaDB):
 
 ```bash
-uv sync --extra ml
-uv run --extra ml ragdial-demo --embedder bge-small --reranker bge-reranker-base
+uvx --from "ragdial-mcp[ml]" ragdial-demo --embedder bge-small --reranker bge-reranker-base
 ```
+
+The same before/after comparison with real models (measured on a laptop CPU, no GPU):
+
+| Variant | Recall@5 | MRR | nDCG@5 | p95 per query |
+|---|---|---|---|---|
+| markdown-256, dense + bge reranker | 0.983 | 0.950 | **0.950** | 13.2 s |
+| fixed-256, dense + bge reranker | 0.833 | 0.767 | 0.779 | 16.8 s |
+
+Five queries flip from miss to hit and none regress. Note the latency: the cross-encoder reranker is very slow on CPU. That's exactly the trade-off `generate_rag_spec` weighs against a latency budget.
 
 ## Connect it to an agent
 
-**Claude Code:** the repo ships a project-scoped [`.mcp.json`](.mcp.json), so opening the folder in Claude Code offers the `ragdial` server. Or add it explicitly:
+**Claude Code:**
 
 ```bash
-claude mcp add ragdial -- uv --directory /abs/path/to/RAGDial-MCP run ragdial-mcp
+claude mcp add ragdial -- uvx ragdial-mcp
+# with real models:
+claude mcp add ragdial -- uvx --from "ragdial-mcp[ml]" ragdial-mcp
 ```
+
+Inside a clone, the project-scoped [`.mcp.json`](.mcp.json) also offers the `ragdial` server automatically, running your local checkout.
 
 **Cursor / Claude Desktop** (`mcpServers` entry):
 
 ```json
-{ "ragdial": { "command": "uv", "args": ["--directory", "/abs/path/to/RAGDial-MCP", "run", "ragdial-mcp"] } }
+{ "ragdial": { "command": "uvx", "args": ["ragdial-mcp"] } }
 ```
 
 **Remote / container** (Streamable HTTP on `http://localhost:8000/mcp`):
@@ -251,7 +274,9 @@ RAGDial-MCP/
 ├── pyproject.toml              # uv project, extras: ml, pdf; entry points
 ├── Dockerfile                  # Streamable HTTP server on :8000/mcp
 ├── .mcp.json                   # Claude Code project config
-├── .github/workflows/ci.yml    # tests on Linux/Windows/macOS + Docker HTTP smoke test
+├── .github/workflows/
+│   ├── ci.yml                  # tests on Linux/Windows/macOS, wheel check, Docker HTTP smoke test
+│   └── release.yml             # GitHub release -> build, verify, publish to PyPI
 ├── sample_data/
 │   ├── corpus/                 # 13 technical docs (tables, nested tables, code)
 │   └── golden_qa.jsonl         # 30 Q&A pairs with verbatim evidence
@@ -260,6 +285,7 @@ RAGDial-MCP/
 │   ├── lab.py                  # evaluation engine: no MCP imports
 │   ├── models.py               # compact Pydantic tool outputs
 │   ├── demo.py                 # `ragdial-demo` CLI
+│   ├── samples.py              # locates the bundled pack ("@sample")
 │   ├── tokens.py               # tiktoken spans (regex fallback offline)
 │   ├── ingestion/parser.py     # MD/TXT/PDF → sections, blocks, structures w/ offsets
 │   ├── chunking/strategies.py  # fixed, recursive, markdown, semantic
@@ -284,6 +310,12 @@ Runs persist in SQLite at `$RAGDIAL_HOME/ragdial.db` (default `~/.ragdial`), so 
 * Token counts use tiktoken `cl100k_base`. If its BPE file can't be downloaded on first run, a regex tokenizer takes over and the backend name is reported in every result.
 * The semantic chunker's quality depends on the embedder. With `hash`, it mostly finds lexical topic shifts.
 * The sample pack is Markdown and plain text only. PDF ingestion works through the `pdf` extra, but multi-column PDF layouts depend on `pymupdf4llm`'s reconstruction.
+
+## Releasing
+
+1. Bump `__version__` in [`src/ragdial_mcp/__init__.py`](src/ragdial_mcp/__init__.py) and push.
+2. Publish a GitHub release tagged `v<version>` (for example `v0.1.0`).
+3. [`release.yml`](.github/workflows/release.yml) checks that the tag matches the version, runs the tests, builds the sdist and wheel, runs the wheel in isolation, and uploads it to PyPI with trusted publishing (no API token stored).
 
 ## License
 

@@ -41,6 +41,26 @@ jobs:
       - name: Demo (full ablation -> benchmark -> diff loop)
         run: uv run ragdial-demo
 
+  package:
+    name: build wheel + run it in isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Build
+        run: uv build
+
+      - name: Run the wheel outside the repo (as a PyPI user would)
+        run: |
+          wheel=$(ls dist/*.whl)
+          cd "$RUNNER_TEMP"
+          uvx --isolated --from "$GITHUB_WORKSPACE/$wheel" ragdial-demo
+          uvx --isolated --from "$GITHUB_WORKSPACE/$wheel" ragdial-mcp --help
+
   docker:
     name: docker build + HTTP smoke test
     runs-on: ubuntu-latest
