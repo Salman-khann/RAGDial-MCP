@@ -1,5 +1,10 @@
 # RAGDial MCP
 
+[![CI](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Salman-khann/RAGDial-MCP/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)
+![MCP SDK](https://img.shields.io/badge/MCP%20SDK-v2-6E56CF)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **RAGDial MCP is a RAG retrieval ablation & chunking lab, packaged as an MCP server.** It turns an AI coding assistant (Claude Code, Cursor, Claude Desktop) into a systematic retrieval tuner. Instead of guessing chunk sizes and overlaps, the agent runs controlled experiments, looks at exactly which tables and code blocks got cut in half, and picks a pipeline using Recall@k, MRR, nDCG@k and p95 latency.
 
 ```
@@ -12,12 +17,23 @@ Everything runs locally: no API keys and no paid services. On the bundled benchm
 
 ## Quick start (under 2 minutes)
 
+You need [uv](https://docs.astral.sh/uv/getting-started/installation/) and nothing else; uv fetches Python 3.11+ if it's missing.
+
 ```bash
-git clone <this repo> && cd ragdial-mcp
-uv sync                 # core: MCP SDK, tiktoken, rank-bm25, numpy
-uv run ragdial-demo      # full before/after loop on sample_data/
-uv run pytest           # 31 deterministic tests
+git clone https://github.com/Salman-khann/RAGDial-MCP.git
+cd RAGDial-MCP
+uv sync                  # core deps: MCP SDK, tiktoken, rank-bm25, numpy
+uv run ragdial-demo      # full before/after loop on sample_data/ (about 4 s)
+uv run pytest            # 31 deterministic tests, no downloads
 ```
+
+To plug it straight into Claude Code without cloning:
+
+```bash
+claude mcp add ragdial -- uvx --from git+https://github.com/Salman-khann/RAGDial-MCP ragdial-mcp
+```
+
+Then ask: *"Ingest my docs folder, ablate fixed vs markdown chunking at 256/512 tokens, and show me which tables got split."*
 
 The real output of `uv run ragdial-demo`, abridged:
 
@@ -57,13 +73,13 @@ uv run --extra ml ragdial-demo --embedder bge-small --reranker bge-reranker-base
 **Claude Code:** the repo ships a project-scoped [`.mcp.json`](.mcp.json), so opening the folder in Claude Code offers the `ragdial` server. Or add it explicitly:
 
 ```bash
-claude mcp add ragdial -- uv --directory /abs/path/to/ragdial-mcp run ragdial-mcp
+claude mcp add ragdial -- uv --directory /abs/path/to/RAGDial-MCP run ragdial-mcp
 ```
 
 **Cursor / Claude Desktop** (`mcpServers` entry):
 
 ```json
-{ "ragdial": { "command": "uv", "args": ["--directory", "/abs/path/to/ragdial-mcp", "run", "ragdial-mcp"] } }
+{ "ragdial": { "command": "uv", "args": ["--directory", "/abs/path/to/RAGDial-MCP", "run", "ragdial-mcp"] } }
 ```
 
 **Remote / container** (Streamable HTTP on `http://localhost:8000/mcp`):
@@ -185,10 +201,11 @@ The `hash` embedder is a lexical proxy, so on it "dense" is close to BM25 and us
 ## Project layout
 
 ```text
-ragdial-mcp/
+RAGDial-MCP/
 ├── pyproject.toml              # uv project, extras: ml, pdf; entry points
 ├── Dockerfile                  # Streamable HTTP server on :8000/mcp
 ├── .mcp.json                   # Claude Code project config
+├── .github/workflows/ci.yml    # tests on Linux/Windows/macOS + Docker HTTP smoke test
 ├── sample_data/
 │   ├── corpus/                 # 13 technical docs (tables, nested tables, code)
 │   └── golden_qa.jsonl         # 30 Q&A pairs with verbatim evidence

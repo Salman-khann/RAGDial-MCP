@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+        exclude:
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Tests
+        run: uv run pytest -v
+
+      - name: Demo (full ablation -> benchmark -> diff loop)
+        run: uv run ragdial-demo
+
+  docker:
+    name: docker build + HTTP smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t ragdial-mcp .
+
+      - name: Start server
+        run: docker run -d --name ragdial -p 8000:8000 ragdial-mcp
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Call tools over Streamable HTTP
+        run: |
+          uv sync --locked
+          uv run python - <<'EOF'
+          import asyncio
+          from mcp import Client
+
+          async def main():
+              for _ in range(60):
+                  try:
+                      async with Client("http://127.0.0.1:8000/mcp") as c:
+                          names = sorted(t.name for t in (await c.list_tools()).tools)
+                          print("tools:", names)
+                          r = await c.call_tool("ingest_corpus", {"folder_path": "/app/sample_data/corpus"})
+                          assert not r.is_error, r.content
+                          print("ingested files:", r.structured_content["file_count"])
+                          return
+                  except Exception as exc:  # server still starting
+                      last = exc
+                      await asyncio.sleep(1)
+              raise SystemExit(f"server never answered: {last!r}")
+
+          asyncio.run(main())
+          EOF
+
+      - name: Server logs
+        if: always()
+        run: docker logs ragdial
