@@ -100,6 +100,52 @@ Then ask the agent something like: *"Ingest sample_data/corpus, ablate fixed/rec
 
 ---
 
+## Local or hosted?
+
+RAGDial does its work (parsing, chunking, embedding, ranking) in its own process, so whoever runs that process supplies the CPU, RAM and disk. The AI model only receives the compact JSON results.
+
+**Run it locally (the default, recommended for most people).** Your MCP client starts `ragdial-mcp` on your machine over stdio, as set up in [`.mcp.json`](.mcp.json) and the quick start.
+
+- Your documents never leave your machine. Only metric summaries and short excerpts reach the model.
+- `ingest_corpus` reads any folder on your disk directly, with no upload step.
+- There's no server to pay for and no account or API key to manage.
+- The core mode is light: the full sample loop runs in seconds. Expect real CPU and RAM use only with the `ml` extra. Its models total about 1.3 GB on disk, and the cross-encoder reranker is slow on CPU but uses an NVIDIA GPU automatically if PyTorch finds one.
+
+**Host it as a shared server** when one of these applies:
+
+- **Heavy models on weak laptops:** a GPU server runs `bge-reranker-base` many times faster than a laptop CPU.
+- **Teams:** everyone shares one experiment history and can diff each other's runs.
+- **Large corpora:** tens of thousands of documents need more memory and time than a laptop comfortably gives.
+- **Zero install for users:** people connect with a URL instead of installing uv and Python.
+
+```bash
+docker build -t ragdial-mcp:ml --build-arg EXTRAS=ml .
+docker run -d -p 8000:8000 --gpus all \
+  -v ragdial:/data \
+  -v /srv/corpora:/corpora:ro \
+  ragdial-mcp:ml
+# clients connect to http://<host>:8000/mcp and ingest e.g. folder_path="/corpora/my-docs"
+```
+
+Drop `--gpus all` on a machine without an NVIDIA GPU.
+
+Keep in mind when hosting:
+
+- **Paths are server paths.** `ingest_corpus` reads folders on the *server*, so mount the document folders into the container (read-only, as above).
+- **There is no built-in authentication.** Anyone who can reach the port can run experiments and read any folder the container can see. Keep it on a private network or behind a reverse proxy that handles auth and TLS. Never expose it directly to the internet.
+- **Data in `/data` is shared** by all users of that server: corpora, runs and reports.
+
+| | Local (stdio) | Hosted (Streamable HTTP) |
+|---|---|---|
+| Who pays for compute | Each user's machine | The server |
+| Where documents live | User's disk | Mounted on the server |
+| Setup per user | Install uv, clone or `uvx` | Paste a URL |
+| Experiment history | Per user (`~/.ragdial`) | Shared (`/data`) |
+| GPU for reranking | Only if the user has one | Provision once on the server |
+| Access control | Your OS account | Your network or reverse proxy (none built in) |
+
+---
+
 ## MCP surface
 
 ### Tools (model-driven actions)
